@@ -310,7 +310,7 @@ void ICACHE_RAM_ATTR ProcessTLMpacket(SX12xxDriverCommon::rx_status const status
         case ELRS_TELEMETRY_TYPE_DATA:
             #if defined(USE_AIRPORT)
               uint8_t numBytes = TLMheader >> ELRS_TELEMETRY_SHIFT;
-              for (uint8_t i = 0; i < count; ++i)
+              for (uint8_t i = 0; i < numBytes; ++i)
               {
                   TxBackpack->write(Radio.RXdataBuffer[i + AP_DATA_OFFSET_INDEX]);
               }

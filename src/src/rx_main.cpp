@@ -1064,7 +1064,7 @@ static void HandleUARTin()
     while (CRSF_RX_SERIAL.available())
     {
         #if defined(USE_AIRPORT)
-            if (apInputBufferLen < AP_MAX_INPUT_BUF_LEN)
+            if (apInputBufferLen < AP_MAX_INPUT_BUF_LEN && connectionState != disconnected)
             {
                 apInputBuffer[apInputBufferLen] = CRSF_RX_SERIAL.read();
                 apInputBufferLen++;
