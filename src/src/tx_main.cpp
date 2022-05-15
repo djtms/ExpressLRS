@@ -73,6 +73,17 @@ StubbornReceiver TelemetryReceiver(ELRS_TELEMETRY_MAX_PACKAGES);
 StubbornSender MspSender(ELRS_MSP_MAX_PACKAGES);
 uint8_t CRSFinBuffer[CRSF_MAX_PACKET_LEN+1];
 
+/////////////////////////////////////////
+/// Variables / constants for Airport ///
+
+#define AP_MAX_INPUT_BUF_LEN    5
+#define AP_DATA_OFFSET_INDEX    2
+
+uint8_t apInputBufferLen = 0;
+uint8_t apInputBuffer[AP_MAX_INPUT_BUF_LEN];
+
+/////////////////////////////////////////
+
 device_affinity_t ui_devices[] = {
   {&CRSF_device, 0},
 #ifdef HAS_LED
@@ -297,7 +308,15 @@ void ICACHE_RAM_ATTR ProcessTLMpacket(SX12xxDriverCommon::rx_status const status
             break;
 
         case ELRS_TELEMETRY_TYPE_DATA:
-            TelemetryReceiver.ReceiveData(TLMheader >> ELRS_TELEMETRY_SHIFT, Radio.RXdataBuffer + 2);
+            #if defined(USE_AIRPORT)
+              uint8_t numBytes = TLMheader >> ELRS_TELEMETRY_SHIFT;
+              for (uint8_t i = 0; i < count; ++i)
+              {
+                  TxBackpack->write(Radio.RXdataBuffer[i + AP_DATA_OFFSET_INDEX]);
+              }
+            #else
+              TelemetryReceiver.ReceiveData(TLMheader >> ELRS_TELEMETRY_SHIFT, Radio.RXdataBuffer + 2);
+            #endif
             break;
     }
 }
@@ -469,8 +488,21 @@ void ICACHE_RAM_ATTR SendRCdataToRF()
     {
       // always enable msp after a channel package since the slot is only used if MspSender has data to send
       NextPacketIsMspData = true;
-      PackChannelData(Radio.TXdataBuffer, &crsf, TelemetryReceiver.GetCurrentConfirm(),
-        NonceTX, TLMratioEnumToValue(ExpressLRS_currAirRate_Modparams->TLMinterval));
+
+      #if defined(USE_AIRPORT)
+        Radio.TXdataBuffer[0] = RC_DATA_PACKET & 0b11;
+        Radio.TXdataBuffer[1] = apInputBufferLen;
+        Radio.TXdataBuffer[2] = apInputBuffer[0];
+        Radio.TXdataBuffer[3] = apInputBuffer[1];
+        Radio.TXdataBuffer[4] = apInputBuffer[2];
+        Radio.TXdataBuffer[5] = apInputBuffer[3];
+        Radio.TXdataBuffer[6] = apInputBuffer[4];
+
+        apInputBufferLen = 0;
+      #else
+        PackChannelData(Radio.TXdataBuffer, &crsf, TelemetryReceiver.GetCurrentConfirm(),
+          NonceTX, TLMratioEnumToValue(ExpressLRS_currAirRate_Modparams->TLMinterval));
+      #endif
     }
   }
 
@@ -1027,6 +1059,10 @@ void setup()
     connectionState = noCrossfire;
   }
 
+  #if defined(USE_AIRPORT)
+    hwTimer.resume();
+  #endif
+
   devicesStart();
 }
 
@@ -1056,6 +1092,24 @@ void loop()
     }
   #endif
 
+  if (TxBackpack->available())
+  {
+    #if defined(USE_AIRPORT)
+      if (apInputBufferLen < AP_MAX_INPUT_BUF_LEN)
+      {
+        apInputBuffer[apInputBufferLen] = TxBackpack->read();
+        apInputBufferLen++;
+      }
+    #else
+      if (msp.processReceivedByte(TxBackpack->read()))
+      {
+        // Finished processing a complete packet
+        ProcessMSPPacket(msp.getReceivedPacket());
+        msp.markPacketReceived();
+      }
+    #endif
+  }
+
   if (connectionState > MODE_STATES)
   {
     return;
@@ -1065,16 +1119,6 @@ void loop()
   CheckConfigChangePending();
   DynamicPower_Update();
   VtxPitmodeSwitchUpdate();
-
-  if (TxBackpack->available())
-  {
-    if (msp.processReceivedByte(TxBackpack->read()))
-    {
-      // Finished processing a complete packet
-      ProcessMSPPacket(msp.getReceivedPacket());
-      msp.markPacketReceived();
-    }
-  }
 
   /* Send TLM updates to handset if connected + reporting period
    * is elapsed. This keeps handset happy dispite of the telemetry ratio */

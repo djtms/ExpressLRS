@@ -163,8 +163,18 @@ uint8_t debug1 = 0;
 uint8_t debug2 = 0;
 uint8_t debug3 = 0;
 int8_t debug4 = 0;
-///////////////////////////////////////
 #endif
+
+/////////////////////////////////////////
+/// Variables / constants for Airport ///
+
+#define AP_MAX_INPUT_BUF_LEN    5
+#define AP_DATA_OFFSET_INDEX    2
+
+uint8_t apInputBufferLen = 0;
+uint8_t apInputBuffer[AP_MAX_INPUT_BUF_LEN];
+
+/////////////////////////////////////////
 
 #if defined(DEBUG_RCVR_LINKSTATS)
 static bool debugRcvrLinkstatsPending;
@@ -313,7 +323,11 @@ bool ICACHE_RAM_ATTR HandleSendTelemetryResponse()
     alreadyTLMresp = true;
     Radio.TXdataBuffer[0] = TLM_PACKET;
 
-    if (NextTelemetryType == ELRS_TELEMETRY_TYPE_LINK || !TelemetrySender.IsActive())
+    if (NextTelemetryType == ELRS_TELEMETRY_TYPE_LINK
+    #if !defined(USE_AIRPORT)
+        || !TelemetrySender.IsActive()
+    #endif
+        )
     {
         Radio.TXdataBuffer[1] = ELRS_TELEMETRY_TYPE_LINK;
         // The value in linkstatistics is "positivized" (inverted polarity)
@@ -346,13 +360,24 @@ bool ICACHE_RAM_ATTR HandleSendTelemetryResponse()
             NextTelemetryType = ELRS_TELEMETRY_TYPE_LINK;
         }
 
-        TelemetrySender.GetCurrentPayload(&packageIndex, &maxLength, &data);
-        Radio.TXdataBuffer[1] = (packageIndex << ELRS_TELEMETRY_SHIFT) + ELRS_TELEMETRY_TYPE_DATA;
-        Radio.TXdataBuffer[2] = maxLength > 0 ? *data : 0;
-        Radio.TXdataBuffer[3] = maxLength >= 1 ? *(data + 1) : 0;
-        Radio.TXdataBuffer[4] = maxLength >= 2 ? *(data + 2) : 0;
-        Radio.TXdataBuffer[5] = maxLength >= 3 ? *(data + 3): 0;
-        Radio.TXdataBuffer[6] = maxLength >= 4 ? *(data + 4): 0;
+        #if defined(USE_AIRPORT)
+            Radio.TXdataBuffer[1] = (apInputBufferLen << ELRS_TELEMETRY_SHIFT) + ELRS_TELEMETRY_TYPE_DATA;
+            Radio.TXdataBuffer[2] = apInputBuffer[0];
+            Radio.TXdataBuffer[3] = apInputBuffer[1];
+            Radio.TXdataBuffer[4] = apInputBuffer[2];
+            Radio.TXdataBuffer[5] = apInputBuffer[3];
+            Radio.TXdataBuffer[6] = apInputBuffer[4];
+
+            apInputBufferLen = 0;
+        #else
+            TelemetrySender.GetCurrentPayload(&packageIndex, &maxLength, &data);
+            Radio.TXdataBuffer[1] = (packageIndex << ELRS_TELEMETRY_SHIFT) + ELRS_TELEMETRY_TYPE_DATA;
+            Radio.TXdataBuffer[2] = maxLength > 0 ? *data : 0;
+            Radio.TXdataBuffer[3] = maxLength >= 1 ? *(data + 1) : 0;
+            Radio.TXdataBuffer[4] = maxLength >= 2 ? *(data + 2) : 0;
+            Radio.TXdataBuffer[5] = maxLength >= 3 ? *(data + 3): 0;
+            Radio.TXdataBuffer[6] = maxLength >= 4 ? *(data + 4): 0;
+        #endif
     }
 
     uint16_t crc = ota_crc.calc(Radio.TXdataBuffer, 7, CRCInitializer);
@@ -646,22 +671,30 @@ static void ICACHE_RAM_ATTR ProcessRfPacket_RC()
     if (connectionState != connected)
         return;
 
-    bool telemetryConfirmValue = UnpackChannelData(Radio.RXdataBuffer, &crsf,
-        NonceRX, TLMratioEnumToValue(ExpressLRS_currAirRate_Modparams->TLMinterval));
-    TelemetrySender.ConfirmCurrentPayload(telemetryConfirmValue);
+    #if defined(USE_AIRPORT)
+        uint8_t numBytes = Radio.RXdataBuffer[1];
+        for (uint8_t i = 0; i < numBytes; ++i)
+        {
+            Serial.write(Radio.RXdataBuffer[i + AP_DATA_OFFSET_INDEX]);
+        }
+    #else
+        bool telemetryConfirmValue = UnpackChannelData(Radio.RXdataBuffer, &crsf,
+            NonceRX, TLMratioEnumToValue(ExpressLRS_currAirRate_Modparams->TLMinterval));
+        TelemetrySender.ConfirmCurrentPayload(telemetryConfirmValue);
 
-    // No channels packets to the FC if no model match
-    if (connectionHasModelMatch)
-    {
-        #if defined(GPIO_PIN_PWM_OUTPUTS)
-        newChannelsAvailable = true;
-        #else
-        crsf.sendRCFrameToFC();
-        #endif
-        #if defined(DEBUG_RCVR_LINKSTATS)
-        debugRcvrLinkstatsPending = true;
-        #endif
-    }
+        // No channels packets to the FC if no model match
+        if (connectionHasModelMatch)
+        {
+            #if defined(GPIO_PIN_PWM_OUTPUTS)
+            newChannelsAvailable = true;
+            #else
+            crsf.sendRCFrameToFC();
+            #endif
+            #if defined(DEBUG_RCVR_LINKSTATS)
+            debugRcvrLinkstatsPending = true;
+            #endif
+        }
+    #endif
 }
 
 /**
@@ -928,7 +961,11 @@ static void setupSerial()
 #endif
 
 #if defined(PLATFORM_ESP8266)
-    Serial.begin(RCVR_UART_BAUD);
+    #if defined(USE_AIRPORT)
+        Serial.begin(AIRPORT_BAUD);
+    #else
+        Serial.begin(RCVR_UART_BAUD);
+    #endif
     #if defined(RCVR_INVERT_TX)
     USC0(UART0) |= BIT(UCTXI);
     #endif
@@ -1026,27 +1063,35 @@ static void HandleUARTin()
 #if !defined(CRSF_RCVR_NO_SERIAL)
     while (CRSF_RX_SERIAL.available())
     {
-        telemetry.RXhandleUARTin(CRSF_RX_SERIAL.read());
+        #if defined(USE_AIRPORT)
+            if (apInputBufferLen < AP_MAX_INPUT_BUF_LEN)
+            {
+                apInputBuffer[apInputBufferLen] = CRSF_RX_SERIAL.read();
+                apInputBufferLen++;
+            }
+        #else
+            telemetry.RXhandleUARTin(CRSF_RX_SERIAL.read());
 
-        if (telemetry.ShouldCallBootloader())
-        {
-            reset_into_bootloader();
-        }
-        if (telemetry.ShouldCallEnterBind())
-        {
-            EnterBindingMode();
-        }
-        if (telemetry.ShouldCallUpdateModelMatch())
-        {
-            UpdateModelMatch(telemetry.GetUpdatedModelMatch());
-        }
-        if (telemetry.ShouldSendDeviceFrame())
-        {
-            uint8_t deviceInformation[DEVICE_INFORMATION_LENGTH];
-            crsf.GetDeviceInformation(deviceInformation, 0);
-            crsf.SetExtendedHeaderAndCrc(deviceInformation, CRSF_FRAMETYPE_DEVICE_INFO, DEVICE_INFORMATION_FRAME_SIZE, CRSF_ADDRESS_CRSF_RECEIVER, CRSF_ADDRESS_FLIGHT_CONTROLLER);
-            crsf.sendMSPFrameToFC(deviceInformation);
-        }
+            if (telemetry.ShouldCallBootloader())
+            {
+                reset_into_bootloader();
+            }
+            if (telemetry.ShouldCallEnterBind())
+            {
+                EnterBindingMode();
+            }
+            if (telemetry.ShouldCallUpdateModelMatch())
+            {
+                UpdateModelMatch(telemetry.GetUpdatedModelMatch());
+            }
+            if (telemetry.ShouldSendDeviceFrame())
+            {
+                uint8_t deviceInformation[DEVICE_INFORMATION_LENGTH];
+                crsf.GetDeviceInformation(deviceInformation, 0);
+                crsf.SetExtendedHeaderAndCrc(deviceInformation, CRSF_FRAMETYPE_DEVICE_INFO, DEVICE_INFORMATION_FRAME_SIZE, CRSF_ADDRESS_CRSF_RECEIVER, CRSF_ADDRESS_FLIGHT_CONTROLLER);
+                crsf.sendMSPFrameToFC(deviceInformation);
+            }
+        #endif
     }
 #endif
 }

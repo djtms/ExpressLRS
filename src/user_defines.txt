@@ -115,3 +115,10 @@
 # Enable reporting of RF FreqCorrection in RX's SNR LinkStatistics, also decreases packet rate
 # on Team2.4 for the additional time needed to include the packet header / enable FreqCorrection
 #-DDEBUG_FREQ_CORRECTION
+
+# Use an ELRS TX and RX as a transparent UART over the air
+# NOTE: YOU MUST ALSO ENABLE -DDEBUG_CRSF_NO_OUTPUT when using this, to suppress CRSF messages on the RX
+# NOTE2: To stop the TX going into wifi update mode due to no CRSF signal,
+# you should comment out -DAUTO_WIFI_ON_INTERVAL
+#-DUSE_AIRPORT
+#-DAIRPORT_BAUD=460800
